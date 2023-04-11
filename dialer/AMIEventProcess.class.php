@@ -69,7 +69,7 @@ class AMIEventProcess extends TuberiaProcess
 
     private $_queueshadow = NULL;
 
-    public function inicioPostDemonio($infoConfig, &$oMainLog)
+    public function inicioPostDemonio($infoConfig = null, &$oMainLog = null): bool
     {
         $this->_log = $oMainLog;
         $this->_multiplex = new MultiplexServer(NULL, $this->_log);
@@ -107,14 +107,16 @@ class AMIEventProcess extends TuberiaProcess
             $this->_tuberia->registrarManejador('*', $k, array($this, "rpc_$k"));
 
         // Registro de manejadores de eventos desde HubProcess
-        $this->_tuberia->registrarManejador('HubProcess', 'finalizando', array($this, "msg_finalizando"));
+        $this->_tuberia->registrarManejador('HubProcess', 'finalizando', function ($sFuente, $sDestino, $sNombreMensaje, $iTimestamp, $datos) {
+            return $this->msg_finalizando($sFuente, $sDestino, $sNombreMensaje, $iTimestamp, $datos);
+        });
 
         $this->_queueshadow = new QueueShadow($this->_log);
 
         return TRUE;
     }
 
-    public function procedimientoDemonio()
+    public function procedimientoDemonio(): bool
     {
         // Verificar si la conexión AMI sigue siendo válida
         if (!is_null($this->_config)) {
@@ -133,10 +135,10 @@ class AMIEventProcess extends TuberiaProcess
                     $this->_log->output('INFO: conexión a Asterisk restaurada, se reinicia operación normal.');
                 }
             }
-        } else {
-            if (is_null($this->_alarma_faltaconfig)) {
-                $this->_alarma_faltaconfig = $this->_agregarAlarma(3, array($this, '_cb_faltaConfig'), array());
-            }
+        } elseif (is_null($this->_alarma_faltaconfig)) {
+            $this->_alarma_faltaconfig = $this->_agregarAlarma(3, function () {
+                return $this->_cb_faltaConfig();
+            }, array());
         }
 
         // Verificar si existen peticiones QueueStatus pendientes
@@ -195,7 +197,7 @@ class AMIEventProcess extends TuberiaProcess
     	return TRUE;
     }
 
-    public function limpiezaDemonio($signum)
+    public function limpiezaDemonio($signum = null)
     {
 
         // Mandar a cerrar todas las conexiones activas
@@ -209,7 +211,9 @@ class AMIEventProcess extends TuberiaProcess
         if (is_null($this->_config)) {
             $this->_log->output('WARN: no se dispone de credenciales para conexión a Asterisk, se piden a SQLWorkerProcess y espera...');
             $this->_tuberia->msg_SQLWorkerProcess_requerir_credencialesAsterisk();
-            $this->_alarma_faltaconfig = $this->_agregarAlarma(3, array($this, '_cb_faltaConfig'), array());
+            $this->_alarma_faltaconfig = $this->_agregarAlarma(3, function () {
+                return $this->_cb_faltaConfig();
+            }, array());
         }
     }
 
@@ -296,13 +300,23 @@ class AMIEventProcess extends TuberiaProcess
             ) as $k)
                 $astman->add_event_handler($k, array($this, "msg_$k"));
 
-            $astman->add_event_handler('Bridge', array($this, "msg_Link")); // Visto en Asterisk 1.6.2.x
-            $astman->add_event_handler('DialBegin', array($this, "msg_Dial")); 
-            $astman->add_event_handler('QueueCallerJoin', array($this, "msg_Join")); 
-            $astman->add_event_handler('QueueCallerLeave', array($this, "msg_Leave")); 
+            $astman->add_event_handler('Bridge', function ($sEvent, $params, $sServer, $iPort) {
+                return $this->msg_Link($sEvent, $params, $sServer, $iPort);
+            }); // Visto en Asterisk 1.6.2.x
+            $astman->add_event_handler('DialBegin', function ($sEvent, $params, $sServer, $iPort) {
+                return $this->msg_Dial($sEvent, $params, $sServer, $iPort);
+            }); 
+            $astman->add_event_handler('QueueCallerJoin', function ($sEvent, $params, $sServer, $iPort) {
+                return $this->msg_Join($sEvent, $params, $sServer, $iPort);
+            }); 
+            $astman->add_event_handler('QueueCallerLeave', function ($sEvent, $params, $sServer, $iPort) {
+                return $this->msg_Leave($sEvent, $params, $sServer, $iPort);
+            }); 
 
             if ($this->DEBUG && $this->_config['dialer']['allevents'])
-                $astman->add_event_handler('*', array($this, 'msg_Default'));
+                $astman->add_event_handler('*', function ($sEvent, $params, $sServer, $iPort) {
+                    return $this->msg_Default($sEvent, $params, $sServer, $iPort);
+                });
 
             $this->_ami = $astman;
             return TRUE;
@@ -383,10 +397,8 @@ class AMIEventProcess extends TuberiaProcess
     private function _quitarBreakAgente($sAgente)
     {
         $a = $this->_listaAgentes->buscar('agentchannel', $sAgente);
-        if (!is_null($a)) {
-            if (!is_null($a->id_break)) {
-                $a->clearBreak($this->_ami);
-            }
+        if (!is_null($a) && !is_null($a->id_break)) {
+            $a->clearBreak($this->_ami);
         }
     }
 
@@ -495,7 +507,7 @@ class AMIEventProcess extends TuberiaProcess
         }
     }
 
-    private function _manejarLlamadaEspecialECCP($params)
+    private function _manejarLlamadaEspecialECCP($params): bool
     {
     	$sKey = $params['ActionID'];
 
@@ -520,11 +532,9 @@ class AMIEventProcess extends TuberiaProcess
                             $this->_log->output("DEBUG: AgentLogin({$listaECCP[4]}) ".
                                 "llamada contestada, esperando clave de agente...");
                         }
-                    } else {
-                        if ($this->DEBUG) {
-                            $this->_log->output("DEBUG: AgentLogin({$listaECCP[4]}) ".
-                                "llamada ha fallado.");
-                        }
+                    } elseif ($this->DEBUG) {
+                        $this->_log->output("DEBUG: AgentLogin({$listaECCP[4]}) ".
+                            "llamada ha fallado.");
                     }
                 }
                 return TRUE;
@@ -544,7 +554,7 @@ class AMIEventProcess extends TuberiaProcess
         return FALSE;   // Llamada NO es una llamada especial ECCP
     }
 
-    private function _manejarHangupAgentLoginFallido($params)
+    private function _manejarHangupAgentLoginFallido($params): bool
     {
         $a = $this->_listaAgentes->buscar('uniqueidlogin', $params['Uniqueid']);
         if (is_null($a)) return FALSE;
@@ -556,7 +566,7 @@ class AMIEventProcess extends TuberiaProcess
         return TRUE;
     }
 
-    private function _nuevasCampanias($listaCampaniasAvisar)
+    private function _nuevasCampanias($listaCampaniasAvisar): bool
     {
         // TODO: purgar campañas salientes fuera de horario
         // Nuevas campañas salientes
@@ -616,11 +626,9 @@ class AMIEventProcess extends TuberiaProcess
 
         // Crear nuevos registros para las nuevas colas aisladas
         foreach ($listaCampaniasAvisar['incoming_queue_new'] as $id => $tupla) {
-            if (!isset($this->_colasEntrantes[$tupla['queue']]))
-                if ($this->DEBUG) {
-                    $this->_log->output('DEBUG: '.__METHOD__.': cola entrante '.
-                        'agregada: '.$tupla['queue']);
-                }
+            if (!isset($this->_colasEntrantes[$tupla['queue']]) && $this->DEBUG)
+                $this->_log->output('DEBUG: '.__METHOD__.': cola entrante '.
+                    'agregada: '.$tupla['queue']);
                 $this->_colasEntrantes[$tupla['queue']] = array(
                     'id_queue_call_entry'   =>  $id,
                     'queue'                 =>  $tupla['queue'],
@@ -630,11 +638,9 @@ class AMIEventProcess extends TuberiaProcess
 
         // Crear nuevas campañas que entran en servicio
         foreach ($listaCampaniasAvisar['incoming'] as $id => $tupla) {
-            if (!isset($this->_colasEntrantes[$tupla['queue']]))
-                if ($this->DEBUG) {
-                    $this->_log->output('DEBUG: '.__METHOD__.': cola entrante '.
-                        'agregada: '.$tupla['queue']);
-                }
+            if (!isset($this->_colasEntrantes[$tupla['queue']]) && $this->DEBUG)
+                $this->_log->output('DEBUG: '.__METHOD__.': cola entrante '.
+                    'agregada: '.$tupla['queue']);
                 $this->_colasEntrantes[$tupla['queue']] = array(
                     'id_queue_call_entry'   =>  $tupla['id_queue_call_entry'],
                     'queue'                 =>  $tupla['queue'],
@@ -867,7 +873,9 @@ class AMIEventProcess extends TuberiaProcess
             $this->_config['dialer']['allevents'] = $v;
             if (!is_null($this->_ami)) {
             	$this->_ami->remove_event_handler('*');
-                if ($v) $this->_ami->add_event_handler('*', array($this, 'msg_Default'));
+                if ($v) $this->_ami->add_event_handler('*', function ($sEvent, $params, $sServer, $iPort) {
+                    return $this->msg_Default($sEvent, $params, $sServer, $iPort);
+                });
             }
             break;
         default:
@@ -1007,7 +1015,9 @@ class AMIEventProcess extends TuberiaProcess
 
         $r = $a->llamada->agregarCanalSilenciado($channel);
         if ($r && !is_null($timeout)) {
-            $this->_agregarAlarma($timeout, array($this, '_quitarSilencio'), array($a->llamada));
+            $this->_agregarAlarma($timeout, function ($llamada) {
+                return $this->_quitarSilencio($llamada);
+            }, array($a->llamada));
         }
     }
 
@@ -1031,7 +1041,9 @@ class AMIEventProcess extends TuberiaProcess
         if (count($llamada->mutedchannels) > 0) {
             foreach ($llamada->mutedchannels as $chan) {
                 $this->_ami->asyncMixMonitorMute(
-                    array($this, '_cb_MixMonitorMute'),
+                    function ($r) {
+                        return $this->_cb_MixMonitorMute($r);
+                    },
                     NULL,
                     $chan, false);
             }
@@ -1124,7 +1136,9 @@ class AMIEventProcess extends TuberiaProcess
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
         $this->_tuberia->enviarRespuesta($sFuente, call_user_func_array(
-            array($this, '_nuevasCampanias'), $datos));
+            function ($listaCampaniasAvisar) {
+                return $this->_nuevasCampanias($listaCampaniasAvisar);
+            }, $datos));
     }
 
     public function rpc_nuevasLlamadasMarcar($sFuente, $sDestino,
@@ -1134,7 +1148,9 @@ class AMIEventProcess extends TuberiaProcess
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
         $this->_tuberia->enviarRespuesta($sFuente, call_user_func_array(
-            array($this, '_nuevasLlamadasMarcar'), $datos));
+            function ($listaLlamadas) {
+                return $this->_nuevasLlamadasMarcar($listaLlamadas);
+            }, $datos));
     }
 
     public function rpc_ejecutarOriginate($sFuente, $sDestino,
@@ -1148,7 +1164,9 @@ class AMIEventProcess extends TuberiaProcess
          * _ejecutarOriginate va a iniciar una llamada AMI asíncrona, y el
          * callback de esa llamada va a invocar enviarRespuesta. */
         array_unshift($datos, $sFuente);
-        call_user_func_array(array($this, '_ejecutarOriginate'), $datos);
+        call_user_func_array(function ($sFuente, $sActionID, $iTimeoutOriginate, $iTimestampInicioOriginate, $sContext, $sCID, $sCadenaVar, $retry, $trunk, $precall_events = array()) {
+            return $this->_ejecutarOriginate($sFuente, $sActionID, $iTimeoutOriginate, $iTimestampInicioOriginate, $sContext, $sCID, $sCadenaVar, $retry, $trunk, $precall_events);
+        }, $datos);
     }
 
     public function rpc_agregarIntentoLoginAgente($sFuente, $sDestino,
@@ -1158,7 +1176,9 @@ class AMIEventProcess extends TuberiaProcess
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
         $this->_tuberia->enviarRespuesta($sFuente, call_user_func_array(
-            array($this, '_agregarIntentoLoginAgente'), $datos));
+            function ($sAgente, $sExtension, $iTimeout) {
+                return $this->_agregarIntentoLoginAgente($sAgente, $sExtension, $iTimeout);
+            }, $datos));
     }
 
     public function rpc_cancelarIntentoLoginAgente($sFuente, $sDestino,
@@ -1168,7 +1188,9 @@ class AMIEventProcess extends TuberiaProcess
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
         $this->_tuberia->enviarRespuesta($sFuente, call_user_func_array(
-            array($this, '_cancelarIntentoLoginAgente'), $datos));
+            function ($sAgente) {
+                return $this->_cancelarIntentoLoginAgente($sAgente);
+            }, $datos));
     }
 
     public function rpc_infoSeguimientoAgente($sFuente, $sDestino,
@@ -1178,7 +1200,9 @@ class AMIEventProcess extends TuberiaProcess
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
         $this->_tuberia->enviarRespuesta($sFuente, call_user_func_array(
-            array($this, '_infoSeguimientoAgente'), $datos));
+            function ($sAgente) {
+                return $this->_infoSeguimientoAgente($sAgente);
+            }, $datos));
     }
 
     public function rpc_infoSeguimientoAgentesCola($sFuente, $sDestino,
@@ -1188,7 +1212,9 @@ class AMIEventProcess extends TuberiaProcess
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
         $this->_tuberia->enviarRespuesta($sFuente, call_user_func_array(
-            array($this, '_infoSeguimientoAgentesCola'), $datos));
+            function ($queue, $agentsexclude = array()) {
+                return $this->_infoSeguimientoAgentesCola($queue, $agentsexclude);
+            }, $datos));
     }
 
     public function rpc_reportarInfoLlamadaAtendida($sFuente, $sDestino,
@@ -1198,7 +1224,9 @@ class AMIEventProcess extends TuberiaProcess
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
         $this->_tuberia->enviarRespuesta($sFuente, call_user_func_array(
-            array($this, '_reportarInfoLlamadaAtendida'), $datos));
+            function ($sAgente) {
+                return $this->_reportarInfoLlamadaAtendida($sAgente);
+            }, $datos));
     }
 
     public function rpc_reportarInfoLlamadaAgendada($sFuente, $sDestino,
@@ -1208,7 +1236,9 @@ class AMIEventProcess extends TuberiaProcess
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
         $this->_tuberia->enviarRespuesta($sFuente, call_user_func_array(
-            array($this, '_reportarInfoLlamadaAgendada'), $datos));
+            function ($sAgente) {
+                return $this->_reportarInfoLlamadaAgendada($sAgente);
+            }, $datos));
     }
 
     public function rpc_reportarInfoLlamadasCampania($sFuente, $sDestino,
@@ -1218,7 +1248,9 @@ class AMIEventProcess extends TuberiaProcess
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
         $this->_tuberia->enviarRespuesta($sFuente, call_user_func_array(
-            array($this, '_reportarInfoLlamadasCampania'), $datos));
+            function ($sTipoCampania, $idCampania) {
+                return $this->_reportarInfoLlamadasCampania($sTipoCampania, $idCampania);
+            }, $datos));
     }
 
     public function rpc_agentesAgendables($sFuente, $sDestino, $sNombreMensaje,
@@ -1228,7 +1260,9 @@ class AMIEventProcess extends TuberiaProcess
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
         $this->_tuberia->enviarRespuesta($sFuente, call_user_func_array(
-            array($this, '_agentesAgendables'), $datos));
+            function ($listaAgendables) {
+                return $this->_agentesAgendables($listaAgendables);
+            }, $datos));
     }
 
     public function rpc_reportarInfoLlamadasColaEntrante($sFuente, $sDestino,
@@ -1238,7 +1272,9 @@ class AMIEventProcess extends TuberiaProcess
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
         $this->_tuberia->enviarRespuesta($sFuente, call_user_func_array(
-            array($this, '_reportarInfoLlamadasColaEntrante'), $datos));
+            function ($sCola) {
+                return $this->_reportarInfoLlamadasColaEntrante($sCola);
+            }, $datos));
     }
 
     public function rpc_pingAgente($sFuente, $sDestino,
@@ -1248,7 +1284,9 @@ class AMIEventProcess extends TuberiaProcess
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
         $this->_tuberia->enviarRespuesta($sFuente, call_user_func_array(
-            array($this, '_pingAgente'), $datos));
+            function ($sAgente) {
+                return $this->_pingAgente($sAgente);
+            }, $datos));
     }
 
     public function rpc_dumpstatus($sFuente, $sDestino,
@@ -1258,7 +1296,9 @@ class AMIEventProcess extends TuberiaProcess
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
         $this->_tuberia->enviarRespuesta($sFuente, call_user_func_array(
-            array($this, '_dumpstatus'), $datos));
+            function () {
+                return $this->_dumpstatus();
+            }, $datos));
     }
 
     public function rpc_listarTotalColasTrabajoAgente($sFuente, $sDestino,
@@ -1268,7 +1308,9 @@ class AMIEventProcess extends TuberiaProcess
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
         $this->_tuberia->enviarRespuesta($sFuente, call_user_func_array(
-            array($this, '_listarTotalColasTrabajoAgente'), $datos));
+            function ($ks) {
+                return $this->_listarTotalColasTrabajoAgente($ks);
+            }, $datos));
     }
 
     public function rpc_iniciarBreakAgente($sFuente, $sDestino,
@@ -1356,7 +1398,9 @@ class AMIEventProcess extends TuberiaProcess
         list($total_agents, $queueflags) = $datos;
 
         $this->_ami->asyncCommand(
-            array($this, '_cb_Command_DatabaseShow'),
+            function ($r, $total_agents, $queueflags) {
+                return $this->_cb_Command_DatabaseShow($r, $total_agents, $queueflags);
+            },
             array($total_agents, $queueflags),
             'database show QPENALTY');
     }
@@ -1380,10 +1424,8 @@ class AMIEventProcess extends TuberiaProcess
         $dynmembers = array();
         foreach (array_keys($db_output) as $k) {
             $regs = NULL;
-            if (preg_match('|^/QPENALTY/(\d+)/agents/(\S+)$|', $k, $regs)) {
-                if (isset($arrExt[$regs[2]])) {
-                    $dynmembers[$arrExt[$regs[2]]][$regs[1]] = (int)$db_output[$k];
-                }
+            if (preg_match('|^/QPENALTY/(\d+)/agents/(\S+)$|', $k, $regs) && isset($arrExt[$regs[2]])) {
+                $dynmembers[$arrExt[$regs[2]]][$regs[1]] = (int)$db_output[$k];
             }
         }
 
@@ -1441,9 +1483,9 @@ class AMIEventProcess extends TuberiaProcess
 
         $versionMinima = array(12, 0, 0);
         while (count($versionMinima) < count($this->_asteriskVersion))
-            array_push($versionMinima, 0);
+            $versionMinima[] = 0;
         while (count($versionMinima) > count($this->_asteriskVersion))
-            array_push($this->_asteriskVersion, 0);
+            $this->_asteriskVersion[] = 0;
         $bEventosCola = ($this->_asteriskVersion >= $versionMinima);
 
         // Asumir para Asterisk 12 o superior que siempre se tiene eventos de cola
@@ -1475,7 +1517,9 @@ class AMIEventProcess extends TuberiaProcess
         if ($this->DEBUG) {
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
-        call_user_func_array(array($this, '_idNuevaSesionAgente'), $datos);
+        call_user_func_array(function ($sAgente, $id_sesion) {
+            return $this->_idNuevaSesionAgente($sAgente, $id_sesion);
+        }, $datos);
     }
 
     public function msg_quitarBreakAgente($sFuente, $sDestino,
@@ -1484,7 +1528,9 @@ class AMIEventProcess extends TuberiaProcess
         if ($this->DEBUG) {
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
-        call_user_func_array(array($this, '_quitarBreakAgente'), $datos);
+        call_user_func_array(function ($sAgente) {
+            return $this->_quitarBreakAgente($sAgente);
+        }, $datos);
     }
 
     public function msg_quitarReservaAgente($sFuente, $sDestino,
@@ -1493,7 +1539,9 @@ class AMIEventProcess extends TuberiaProcess
         if ($this->DEBUG) {
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
-        call_user_func_array(array($this, '_quitarReservaAgente'), $datos);
+        call_user_func_array(function ($sAgente) {
+            return $this->_quitarReservaAgente($sAgente);
+        }, $datos);
     }
 
     public function msg_idnewcall($sFuente, $sDestino,
@@ -1502,7 +1550,9 @@ class AMIEventProcess extends TuberiaProcess
         if ($this->DEBUG) {
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
-        call_user_func_array(array($this, '_idnewcall'), $datos);
+        call_user_func_array(function ($tipo_llamada, $uniqueid, $id_call) {
+            return $this->_idnewcall($tipo_llamada, $uniqueid, $id_call);
+        }, $datos);
     }
 
     public function msg_idcurrentcall($sFuente, $sDestino,
@@ -1511,7 +1561,9 @@ class AMIEventProcess extends TuberiaProcess
         if ($this->DEBUG) {
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
-        call_user_func_array(array($this, '_idcurrentcall'), $datos);
+        call_user_func_array(function ($tipo_llamada, $id_call, $id_current_call) {
+            return $this->_idcurrentcall($tipo_llamada, $id_call, $id_current_call);
+        }, $datos);
     }
 
     public function msg_actualizarConfig($sFuente, $sDestino,
@@ -1520,7 +1572,9 @@ class AMIEventProcess extends TuberiaProcess
         if ($this->DEBUG) {
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
-        call_user_func_array(array($this, '_actualizarConfig'), $datos);
+        call_user_func_array(function ($k, $v) {
+            return $this->_actualizarConfig($k, $v);
+        }, $datos);
     }
 
     public function msg_llamadaSilenciada($sFuente, $sDestino,
@@ -1529,7 +1583,9 @@ class AMIEventProcess extends TuberiaProcess
         if ($this->DEBUG) {
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
-        call_user_func_array(array($this, '_llamadaSilenciada'), $datos);
+        call_user_func_array(function ($sAgente, $channel, $timeout = \NULL) {
+            return $this->_llamadaSilenciada($sAgente, $channel, $timeout);
+        }, $datos);
     }
 
     public function msg_llamadaSinSilencio($sFuente, $sDestino,
@@ -1538,7 +1594,9 @@ class AMIEventProcess extends TuberiaProcess
         if ($this->DEBUG) {
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
-        call_user_func_array(array($this, '_llamadaSinSilencio'), $datos);
+        call_user_func_array(function ($sAgente) {
+            return $this->_llamadaSinSilencio($sAgente);
+        }, $datos);
     }
 
     public function msg_abortarNuevasLlamadasMarcar($sFuente, $sDestino,
@@ -1547,7 +1605,9 @@ class AMIEventProcess extends TuberiaProcess
         if ($this->DEBUG) {
             $this->_log->output('DEBUG: '.__METHOD__.' recibido: '.print_r($datos, 1));
         }
-        call_user_func_array(array($this, '_abortarNuevasLlamadasMarcar'), $datos);
+        call_user_func_array(function ($llamadasAbortar) {
+            return $this->_abortarNuevasLlamadasMarcar($llamadasAbortar);
+        }, $datos);
     }
 
     public function msg_finalizando($sFuente, $sDestino, $sNombreMensaje, $iTimestamp, $datos)
@@ -1555,14 +1615,12 @@ class AMIEventProcess extends TuberiaProcess
         $this->_log->output('INFO: recibido mensaje de finalización, se desloguean agentes...');
         $this->_finalizandoPrograma = TRUE;
         foreach ($this->_listaAgentes as $a) {
-        	if ($a->estado_consola != 'logged-out') {
-                if (!is_null($this->_ami)) {
-                	if ($a->type == 'Agent') {
-                        $this->_ami->Agentlogoff($a->number);
-                	} else {
-                	    foreach ($a->colas_actuales as $q) $this->_ami->QueueRemove($q, $a->channel);
-                    }
-                }
+        	if ($a->estado_consola != 'logged-out' && !is_null($this->_ami)) {
+                if ($a->type == 'Agent') {
+                       $this->_ami->Agentlogoff($a->number);
+               	} else {
+               	    foreach ($a->colas_actuales as $q) $this->_ami->QueueRemove($q, $a->channel);
+                   }
             }
         }
         $this->_log->output('INFO: esperando a que finalicen todas las llamadas monitoreadas...');
@@ -1609,7 +1667,7 @@ Uniqueid: 1429642067.241008
         }
     }
 
-    public function msg_Default($sEvent, $params, $sServer, $iPort)
+    public function msg_Default($sEvent, $params, $sServer, $iPort): string
     {
         if ($this->DEBUG) {
             $this->_log->output('DEBUG: '.__METHOD__.
@@ -1620,7 +1678,7 @@ Uniqueid: 1429642067.241008
         return 'AMI_EVENT_DISCARD';
     }
 
-    public function msg_Newchannel($sEvent, $params, $sServer, $iPort)
+    public function msg_Newchannel($sEvent, $params, $sServer, $iPort): bool
     {
         if ($this->DEBUG) {
             $this->_log->output('DEBUG: '.__METHOD__.
@@ -1659,7 +1717,7 @@ Uniqueid: 1429642067.241008
         return FALSE;
     }
 
-    public function msg_Dial($sEvent, $params, $sServer, $iPort)
+    public function msg_Dial($sEvent, $params, $sServer, $iPort): bool
     {
         if ($this->DEBUG) {
             $this->_log->output('DEBUG: '.__METHOD__.
@@ -1691,11 +1749,9 @@ Uniqueid: 1429642067.241008
             $destUniqueID = $params['DestUniqueid'];
         }
 
-        if(!isset($params['Destination'])) {
-            // Asterisk 13
-            if(isset($params['DestChannel'])) {
-                $params['Destination']=$params['DestChannel'];
-            }
+        // Asterisk 13
+        if(!isset($params['Destination']) && isset($params['DestChannel'])) {
+            $params['Destination']=$params['DestChannel'];
         }
 
         if (!is_null($srcUniqueId) && !is_null($destUniqueID)) {
@@ -1713,7 +1769,7 @@ Uniqueid: 1429642067.241008
                     $this->_log->output("DEBUG: ".__METHOD__.": encontrado canal auxiliar para llamada: {$llamada->actionid}");
                 }
 
-                if (strpos($params['Destination'], 'Local/') !== 0) {
+                if (!str_starts_with($params['Destination'], 'Local/')) {
                     if (is_null($llamada->actualchannel)) {
                         // Primer Dial observado, se asigna directamente
                         $this->_asignarCanalRemotoReal($params, $llamada);
@@ -1778,7 +1834,7 @@ Uniqueid: 1429642067.241008
         $llamada->llamadaIniciaDial($params['local_timestamp_received'], $params['Destination']);
     }
 
-    public function msg_OriginateResponse($sEvent, $params, $sServer, $iPort)
+    public function msg_OriginateResponse($sEvent, $params, $sServer, $iPort): bool
     {
         if ($this->DEBUG) {
             $this->_log->output('DEBUG: '.__METHOD__.
@@ -1881,15 +1937,13 @@ Uniqueid: 1429642067.241008
                     'cola '.$params['Queue'].' de '.$sAgente.
                     ' - no iniciado por requerimiento loginagente.');
             }
-        } else {
-        	if ($this->DEBUG) {
-        		$this->_log->output("DEBUG: ".__METHOD__.": AgentLogin($sAgente) duplicado (múltiples colas), ignorando");
-                $this->_log->output("DEBUG: ".__METHOD__.": EXIT OnAgentlogin");
-        	}
+        } elseif ($this->DEBUG) {
+            $this->_log->output("DEBUG: ".__METHOD__.": AgentLogin($sAgente) duplicado (múltiples colas), ignorando");
+            $this->_log->output("DEBUG: ".__METHOD__.": EXIT OnAgentlogin");
         }
     }
 
-    public function msg_QueueMemberRemoved($sEvent, $params, $sServer, $iPort)
+    public function msg_QueueMemberRemoved($sEvent, $params, $sServer, $iPort): bool
     {
         if ($this->DEBUG) {
             $this->_log->output('DEBUG: '.__METHOD__.
@@ -1932,10 +1986,8 @@ Uniqueid: 1429642067.241008
                 $this->_ejecutarLogoffAgente($params['Location'], $a,
                     $params['local_timestamp_received'], $params['Event']);
             }
-        } else {
-            if ($this->DEBUG) {
-                $this->_log->output("DEBUG: ".__METHOD__.": QueueMemberRemoved({$params['Location']}) en estado no-logoneado, ignorando...");
-            }
+        } elseif ($this->DEBUG) {
+            $this->_log->output("DEBUG: ".__METHOD__.": QueueMemberRemoved({$params['Location']}) en estado no-logoneado, ignorando...");
         }
 
         if ($this->_finalizandoPrograma) $this->_verificarFinalizacionLlamadas();
@@ -1945,7 +1997,7 @@ Uniqueid: 1429642067.241008
         return FALSE;
     }
 
-    public function msg_Join($sEvent, $params, $sServer, $iPort)
+    public function msg_Join($sEvent, $params, $sServer, $iPort): bool
     {
         if ($this->DEBUG) {
             $this->_log->output('DEBUG: '.__METHOD__.
@@ -1977,7 +2029,9 @@ Uniqueid: 1429642067.241008
             if ($llamada->tipo_llamada == 'incoming') {
                 // Esto asume que toda llamada entrante se crea más arriba
                 $this->_ami->asyncGetVar(
-                    array($this, '_cb_GetVar_MIXMONITOR_FILENAME'),
+                    function ($r, $channel, $llamada) {
+                        return $this->_cb_GetVar_MIXMONITOR_FILENAME($r, $channel, $llamada);
+                    },
                     array($params['Channel'], $llamada),
                     $params['Channel'], 'MIXMONITOR_FILENAME');
             }
@@ -2018,7 +2072,7 @@ Uniqueid: 1429642067.241008
 
         // BridgeTechnology simple_bridge con BridgeNumChannels: 1, guardamos datos para esperar el BridgeNumChannels: 2 y disparar el Link simulado
 
-        if($params['BridgeTechnology']<>'simple_bridge') {
+        if($params['BridgeTechnology'] != 'simple_bridge') {
             return false;
         }
 
@@ -2028,11 +2082,11 @@ Uniqueid: 1429642067.241008
             $params['Channel']='Agent/'.$matches[1];
         }
 
-        if($params['BridgeNumChannels']==1) {
+        if ($params['BridgeNumChannels']==1) {
             $saved_bridge_unique[$bunique]  = $params['Uniqueid'];
             $saved_bridge_channel[$bunique] = $params['Channel'];
             $this->_log->output('DEBUG: '.__METHOD__. "Bridge Enter $bunique number channels 1 saving data");
-        } else if ($params['BridgeNumChannels']==2) {
+        } elseif ($params['BridgeNumChannels']==2) {
             $this->_log->output('DEBUG: '.__METHOD__. "Bridge Enter $bunique number channels 2, constructing link channel ".$params['Channel']);
             if(isset($saved_bridge_unique[$bunique])) {
                 $params['Uniqueid1']=$params['Uniqueid'];
@@ -2055,12 +2109,11 @@ Uniqueid: 1429642067.241008
                 // $llamada->actualchannel = $sCanalCandidato
 
             }
-
         }
     }
 
 
-    public function msg_Link($sEvent, $params, $sServer, $iPort)
+    public function msg_Link($sEvent, $params, $sServer, $iPort): bool
     {
         if ($this->DEBUG) {
             $this->_log->output('DEBUG: '.__METHOD__.
@@ -2098,12 +2151,10 @@ Uniqueid: 1429642067.241008
                 $this->_log->output("ERR: ".__METHOD__.": no se ha ".
                     "cargado información de agente $sAgentNum");
                 $this->_tuberia->msg_SQLWorkerProcess_requerir_nuevaListaAgentes();
-            } else {
-                if ($this->DEBUG) {
-                	$this->_log->output('DEBUG: '.__METHOD__.': llamada '.
-                        'transferida a extensión no monitoreada '.$sChannel.
-                        ', se finaliza seguimiento...');
-                }
+            } elseif ($this->DEBUG) {
+                $this->_log->output('DEBUG: '.__METHOD__.': llamada '.
+                       'transferida a extensión no monitoreada '.$sChannel.
+                       ', se finaliza seguimiento...');
             }
             $llamada->llamadaFinalizaSeguimiento(
                 $params['local_timestamp_received'],
@@ -2196,7 +2247,7 @@ Uniqueid: 1429642067.241008
                 if (!is_null($llamada)) $sCanalCandidato = $params['Channel1'];
             }
             if (!is_null($llamada) && !is_null($sCanalCandidato) &&
-                strpos($sCanalCandidato, 'Local/') !== 0) {
+                !str_starts_with($sCanalCandidato, 'Local/')) {
             	if (is_null($llamada->actualchannel)) {
                     $llamada->actualchannel = $sCanalCandidato;
                     if ($this->DEBUG) {
@@ -2205,15 +2256,13 @@ Uniqueid: 1429642067.241008
             		}
             	} elseif ($llamada->actualchannel != $sCanalCandidato) {
                     if (is_null($llamada->timestamp_link)) {
-                		$this->_log->output('WARN: '.__METHOD__.': canal remoto en '.
+                        $this->_log->output('WARN: '.__METHOD__.': canal remoto en '.
+                                  'conflicto, anterior '.$llamada->actualchannel.' nuevo '.
+                                  $sCanalCandidato);
+                    } elseif ($this->DEBUG) {
+                        $this->_log->output('DEBUG: '.__METHOD__.': canal remoto en '.
                             'conflicto, anterior '.$llamada->actualchannel.' nuevo '.
-                            $sCanalCandidato);
-                    } else {
-                        if ($this->DEBUG) {
-                            $this->_log->output('DEBUG: '.__METHOD__.': canal remoto en '.
-                                'conflicto, anterior '.$llamada->actualchannel.' nuevo '.
-                                $sCanalCandidato.', se ignora por ser luego de Link.');
-                        }
+                            $sCanalCandidato.', se ignora por ser luego de Link.');
                     }
             	}
             }
@@ -2268,7 +2317,7 @@ Uniqueid: 1429642067.241008
         return array($r1[2], $r1[0], $r1[1], $params['Channel2']);
     }
 
-    public function msg_Hangup($sEvent, $params, $sServer, $iPort)
+    public function msg_Hangup($sEvent, $params, $sServer, $iPort): bool
     {
         if ($this->DEBUG) {
             $this->_log->output('DEBUG: '.__METHOD__.
@@ -2282,7 +2331,7 @@ Uniqueid: 1429642067.241008
             return FALSE;
         }
 
-        if (strpos($params['Channel'], 'Local/')===0) {
+        if (str_starts_with($params['Channel'], 'Local/')) {
             $this->_log->output('DEBUG: ignoro hangup local');
             return FALSE;
         }
@@ -2341,17 +2390,15 @@ Uniqueid: 1429642067.241008
             $llamada->llamadaFinalizaSeguimiento(
                 $params['local_timestamp_received'],
                 $this->_config['dialer']['llamada_corta']);
-        } else {
-            if ($llamada->status == 'OnHold') {
-                if ($this->DEBUG) {
-                    $this->_log->output('DEBUG: '.__METHOD__.': se ignora Hangup para llamada que se envía a HOLD.');
-                }
-            } else {
-                // Llamada ha sido enlazada al menos una vez
-                $llamada->llamadaFinalizaSeguimiento(
-                    $params['local_timestamp_received'],
-                    $this->_config['dialer']['llamada_corta']);
+        } elseif ($llamada->status == 'OnHold') {
+            if ($this->DEBUG) {
+                $this->_log->output('DEBUG: '.__METHOD__.': se ignora Hangup para llamada que se envía a HOLD.');
             }
+        } else {
+            // Llamada ha sido enlazada al menos una vez
+            $llamada->llamadaFinalizaSeguimiento(
+                $params['local_timestamp_received'],
+                $this->_config['dialer']['llamada_corta']);
         }
     }
 
@@ -2377,7 +2424,7 @@ Uniqueid: 1429642067.241008
         $a->completarLoginAgente($this->_ami);
     }
 
-    public function msg_Agentlogoff($sEvent, $params, $sServer, $iPort)
+    public function msg_Agentlogoff($sEvent, $params, $sServer, $iPort): bool
     {
         if ($this->DEBUG) {
             $this->_log->output('DEBUG: '.__METHOD__.
@@ -2548,10 +2595,8 @@ Uniqueid: 1429642067.241008
             $a = $this->_listaAgentes->buscar('agentchannel', $sAgente);
             if (!is_null($a)) {
                 $this->_evaluarPertenenciaColas($a, $estadoCola);
-            } else {
-                if ($this->DEBUG) {
-                    $this->_log->output('WARN: agente '.$sAgente.' no es un agente registrado en el callcenter, se ignora');
-                }
+            } elseif ($this->DEBUG) {
+                $this->_log->output('WARN: agente '.$sAgente.' no es un agente registrado en el callcenter, se ignora');
             }
         }
 
@@ -2598,7 +2643,6 @@ Uniqueid: 1429642067.241008
                     $a->asyncQueuePause($this->_ami, FALSE, $cola);
                 }
             }
-
             $diffcolas = $a->diferenciaColasDinamicas();
             if (is_array($diffcolas)) {
 
@@ -2608,7 +2652,9 @@ Uniqueid: 1429642067.241008
                         'agregado a las colas ['.implode(' ', array_keys($diffcolas[0])).']');
                     foreach ($diffcolas[0] as $q => $p) {
                         $this->_ami->asyncQueueAdd(
-                            array($this, '_cb_QueueAdd'),
+                            function ($r) {
+                                return $this->_cb_QueueAdd($r);
+                            },
                             NULL,
                             $q, $sAgente, $p, $a->name, $bAgentePausado);
                     }
@@ -2620,25 +2666,27 @@ Uniqueid: 1429642067.241008
                         'quitado de las colas ['.implode(' ', $diffcolas[1]).']');
                     foreach ($diffcolas[1] as $q) {
                         $this->_ami->asyncQueueRemove(
-                            array($this, '_cb_QueueRemove'),
+                            function ($r) {
+                                return $this->_cb_QueueRemove($r);
+                            },
                             NULL,
                             $q, $sAgente);
                     }
                 }
             }
-        } else {
+        } elseif ($a->type != 'Agent') {
             // El agente dinámico no debería estar metido en ninguna de las colas
-            if ($a->type != 'Agent') {
-                $diffcolas = array_intersect($a->colas_actuales, $a->colas_dinamicas);
-                if (count($diffcolas) > 0) {
-                    $this->_log->output('INFO: agente DESLOGONEADO '.$sAgente.' debe ser '.
-                        'quitado de las colas ['.implode(' ', $diffcolas).']');
-                    foreach ($diffcolas as $q) {
-                        $this->_ami->asyncQueueRemove(
-                            array($this, '_cb_QueueRemove'),
-                            NULL,
-                            $q, $sAgente);
-                    }
+            $diffcolas = array_intersect($a->colas_actuales, $a->colas_dinamicas);
+            if ($diffcolas !== []) {
+                $this->_log->output('INFO: agente DESLOGONEADO '.$sAgente.' debe ser '.
+                    'quitado de las colas ['.implode(' ', $diffcolas).']');
+                foreach ($diffcolas as $q) {
+                    $this->_ami->asyncQueueRemove(
+                        function ($r) {
+                            return $this->_cb_QueueRemove($r);
+                        },
+                        NULL,
+                        $q, $sAgente);
                 }
             }
         }
@@ -2677,10 +2725,8 @@ Uniqueid: 1429642067.241008
         if (!is_null($a)) {
             // TODO: existe $params['Paused'] que indica si está en pausa
             $a->actualizarEstadoEnCola($params['Queue'], $params['Status']);
-        } else {
-            if ($this->DEBUG) {
-                $this->_log->output('WARN: agente '.$params['Location'].' no es un agente registrado en el callcenter, se ignora');
-            }
+        } elseif ($this->DEBUG) {
+            $this->_log->output('WARN: agente '.$params['Location'].' no es un agente registrado en el callcenter, se ignora');
         }
     }
 
@@ -2787,14 +2833,13 @@ Uniqueid: 1429642067.241008
                      * la contraseña se ve como AGENT_LOGGEDOFF y no debe de
                      * tocarse.
                      */
-
                     if ($a->estado_consola == 'logged-in') {
                         $this->_log->output('WARN: '.__METHOD__.' agente '.$sAgente.
                             ' está logoneado en dialer pero en estado AGENT_LOGGEDOFF,'.
                             ' se deslogonea en dialer...');
                         $this->_ejecutarLogoffAgente($sAgente, $a, $params['local_timestamp_received'], $params['Event']);
                     }
-                } else {
+                } elseif ($a->estado_consola == 'logged-out') {
                     /* Según Asterisk, el agente está logoneado. Se verifica si
                      * el estado de agente es logoneado, y si no, se lo
                      * deslogonea.
@@ -2803,54 +2848,48 @@ Uniqueid: 1429642067.241008
                      * de estado_consola sea 'logging', el cual no debe de
                      * tocarse porque todavía no llega el evento Agentlogin.
                      * */
-                    if ($a->estado_consola == 'logged-out') {
+                    $this->_log->output('WARN: '.__METHOD__.' agente '.$sAgente.
+                        ' está deslogoneado en dialer pero en estado '.$sAgentStatus.','.
+                        ' se deslogonea en Asterisk...');
+                    $a->forzarLogoffAgente($this->_ami, $this->_log);
+                } elseif ($a->estado_consola == 'logged-in' && $sAgentStatus == 'AGENT_ONCALL') {
+                    if (is_null($a->llamada)) {
                         $this->_log->output('WARN: '.__METHOD__.' agente '.$sAgente.
-                            ' está deslogoneado en dialer pero en estado '.$sAgentStatus.','.
-                            ' se deslogonea en Asterisk...');
-                        $a->forzarLogoffAgente($this->_ami, $this->_log);
-                    } elseif ($a->estado_consola == 'logged-in' && $sAgentStatus == 'AGENT_ONCALL') {
-                        if (is_null($a->llamada)) {
-                            $this->_log->output('WARN: '.__METHOD__.' agente '.$sAgente.
-                                ' en llamada con canal '.$agentdata['TalkingToChan'].
-                                ' pero no hay (todavía) llamada monitoreada.');
-                        } else {
-                            if ($this->DEBUG) {
-                                if (!is_null($a->llamada->actualchannel)) {
-                                    $this->_log->output('DEBUG: '.__METHOD__.': canal esperado '.
-                                        $a->llamada->actualchannel.' real '.$agentdata['TalkingToChan']);
-                                }
-                            }
-                            if (is_null($a->llamada->actualchannel) &&
-                                strpos($agentdata['TalkingToChan'], 'Local/') === 0) {
-                                $this->_log->output('WARN: '.__METHOD__.": el agente ".
-                                    "$sAgente está hablando con canal ".$agentdata['TalkingToChan'].
-                                    " según eventos Agents.");
-                            }
-                            if (!is_null($a->llamada->actualchannel) &&
-                                $a->llamada->actualchannel != $agentdata['TalkingToChan'] &&
-                                !is_null($a->llamada->channel) &&
-                                $a->llamada->channel != $agentdata['TalkingToChan']) {
-                                $this->_log->output('WARN: '.__METHOD__.
-                                    ': llamada con canal remoto recogido en Link auxiliar fue '.
-                                    $a->llamada->actualchannel.' pero realmente es '.$agentdata['TalkingToChan']);
-                                $a->llamada->dump($this->_log);
-                            }
+                            ' en llamada con canal '.$agentdata['TalkingToChan'].
+                            ' pero no hay (todavía) llamada monitoreada.');
+                    } else {
+                        if ($this->DEBUG && !is_null($a->llamada->actualchannel)) {
+                            $this->_log->output('DEBUG: '.__METHOD__.': canal esperado '.
+                                $a->llamada->actualchannel.' real '.$agentdata['TalkingToChan']);
+                        }
+                        if (is_null($a->llamada->actualchannel) &&
+                            str_starts_with($agentdata['TalkingToChan'], 'Local/')) {
+                            $this->_log->output('WARN: '.__METHOD__.": el agente ".
+                                "$sAgente está hablando con canal ".$agentdata['TalkingToChan'].
+                                " según eventos Agents.");
+                        }
+                        if (!is_null($a->llamada->actualchannel) &&
+                            $a->llamada->actualchannel != $agentdata['TalkingToChan'] &&
+                            !is_null($a->llamada->channel) &&
+                            $a->llamada->channel != $agentdata['TalkingToChan']) {
+                            $this->_log->output('WARN: '.__METHOD__.
+                                ': llamada con canal remoto recogido en Link auxiliar fue '.
+                                $a->llamada->actualchannel.' pero realmente es '.$agentdata['TalkingToChan']);
+                            $a->llamada->dump($this->_log);
+                        }
 
-                            /* Se asigna actualchannel si actualchannel es NULL o
-                             * si el valor es distinto de channel. El estado en el
-                             * que TalkingToChan es distinto de channel y actualchannel
-                             * se avisa arriba. */
-                            if (is_null($a->llamada->actualchannel) ||
-                                (!is_null($a->llamada->channel) && $a->llamada->channel != $agentdata['TalkingToChan'])) {
-                                $a->llamada->actualchannel = $agentdata['TalkingToChan'];
-                            }
+                        /* Se asigna actualchannel si actualchannel es NULL o
+                         * si el valor es distinto de channel. El estado en el
+                         * que TalkingToChan es distinto de channel y actualchannel
+                         * se avisa arriba. */
+                        if (is_null($a->llamada->actualchannel) ||
+                            (!is_null($a->llamada->channel) && $a->llamada->channel != $agentdata['TalkingToChan'])) {
+                            $a->llamada->actualchannel = $agentdata['TalkingToChan'];
                         }
                     }
                 }
-            } else {
-                if ($this->DEBUG) {
-                    $this->_log->output('WARN: '.__METHOD__.' agente '.$sAgente.' no es un agente registrado en el callcenter, se ignora');
-                }
+            } elseif ($this->DEBUG) {
+                $this->_log->output('WARN: '.__METHOD__.' agente '.$sAgente.' no es un agente registrado en el callcenter, se ignora');
             }
         }
 

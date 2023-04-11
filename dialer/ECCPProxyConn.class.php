@@ -23,8 +23,8 @@
 
 class ECCPProxyConn extends MultiplexConn
 {
-    private $_log;
-    private $_tuberia;
+    public $sKey;
+    public $multiplexSrv;
     private $_listaReq = array();    // Lista de requerimientos pendientes
     private $_parser = NULL;        // Parser expat para separar los paquetes
     private $_iPosFinal = NULL;     // Posición de parser para el paquete parseado
@@ -40,10 +40,8 @@ class ECCPProxyConn extends MultiplexConn
 
     private $_bFinalizando = FALSE;
 
-    function __construct($oMainLog, $tuberia)
+    function __construct(private $_log, private $_tuberia)
     {
-        $this->_log = $oMainLog;
-        $this->_tuberia = $tuberia;
         $this->_resetParser();
     }
 
@@ -51,7 +49,7 @@ class ECCPProxyConn extends MultiplexConn
     function procesarInicial() {}
 
     // Separar flujo de datos en paquetes, devuelve número de bytes de paquetes aceptados
-    function parsearPaquetes($sDatos)
+    function parsearPaquetes($sDatos): int
     {
         $this->parsearPaquetesXML($sDatos);
         return strlen($sDatos);
@@ -176,7 +174,7 @@ class ECCPProxyConn extends MultiplexConn
             if ($this->_bufferXML != '')
                 $r = xml_parse($this->_parser, $this->_bufferXML);
         }
-        if (!$r) {
+        if ($r === 0) {
             $this->_listaReq[] = array(
                 'errorcode'     =>  xml_get_error_code($this->_parser),
                 'errorstring'   =>  xml_error_string(xml_get_error_code($this->_parser)),
@@ -193,8 +191,12 @@ class ECCPProxyConn extends MultiplexConn
         if (!is_null($this->_parser)) xml_parser_free($this->_parser);
         $this->_parser = xml_parser_create('UTF-8');
         xml_set_element_handler ($this->_parser,
-            array($this, 'xmlStartHandler'),
-            array($this, 'xmlEndHandler'));
+            function ($parser, $name, $attribs) {
+                return $this->xmlStartHandler($parser, $name, $attribs);
+            },
+            function ($parser, $name) {
+                return $this->xmlEndHandler($parser, $name);
+            });
         xml_parser_set_option($this->_parser, XML_OPTION_CASE_FOLDING, 0);
     }
 

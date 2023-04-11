@@ -21,30 +21,25 @@
   +----------------------------------------------------------------------+
   $Id: DialerProcess.class.php,v 1.48 2009/03/26 13:46:58 alex Exp $ */
 
-require_once 'ECCPHelper.lib.php';
+require_once __DIR__ . '/ECCPHelper.lib.php';
 
 class ECCPConn
 {
+    public $multiplexSrv;
     public $DEBUG = FALSE;
-
-    private $_log;
     private $_ami;
     private $_astVersion;
     private $_db;
-    private $_tuberia;
 
     /* Lista de atributos de funciones (decorator). Actualmente se usa para
      * abstraer la autenticación sin tener que repetirla para cada función
      * que la requiera */
     private $_peticionesAttr = array();
 
-    function __construct($oMainLog, $tuberia)
+    function __construct(private $_log, private $_tuberia)
     {
-        $this->_log = $oMainLog;
-        $this->_tuberia = $tuberia;
-
         // Recolectar atributos de los requerimientos
-        foreach (get_class_methods(get_class($this)) as $sMetodo) {
+        foreach (get_class_methods(static::class) as $sMetodo) {
         	$regs = NULL;
             if (preg_match('/^Request_(.+)$/i', $sMetodo, $regs)) {
         		$sRequerimiento = $regs[1];
@@ -130,15 +125,14 @@ class ECCPConn
                     // Verificación de usuario ECCP válido
                     if (is_null($response) &&
                         ($this->_peticionesAttr[$sRequerimiento]['eccpauth'] ||
-                            $this->_peticionesAttr[$sRequerimiento]['agentauth'])) {
-                                if (is_null($connvars['usuarioeccp']))
-                                    $response = $this->_generarRespuestaFallo(401, 'Unauthorized');
+                            $this->_peticionesAttr[$sRequerimiento]['agentauth']) && is_null($connvars['usuarioeccp'])) {
+                                $response = $this->_generarRespuestaFallo(401, 'Unauthorized');
                     }
                     try {
                         // Verificación de que agente existe y tiene contraseña válida
                         if (is_null($response) && $this->_peticionesAttr[$sRequerimiento]['agentauth']) {
                             // Verificar que agente está presente
-                            if (!isset($comando->agent_number)) {
+                            if (!(property_exists($comando, 'agent_number') && $comando->agent_number instanceof \SimpleXMLElement)) {
                                 $response = $this->_generarRespuestaFallo(400, 'Bad request');
                             } else {
                                 $sAgente = (string)$comando->agent_number;
@@ -150,15 +144,13 @@ class ECCPConn
                                 if (is_null($this->_parseAgent($sAgente))) {
                                     $this->_agregarRespuestaFallo($xml_reqresponse, 417, 'Invalid agent number');
                                     $response = $xml_response;
-                                } else {
+                                } elseif (!$this->_existeAgente($sAgente)) {
                                     // Verificar que el agente sea válido en el sistema
-                                    if (!$this->_existeAgente($sAgente)) {
-                                        $this->_agregarRespuestaFallo($xml_reqresponse, 404, 'Specified agent not found');
-                                        $response = $xml_response;
-                                    } elseif (!$this->_hashValidoAgenteECCP($comando, $comando['appcookie'])) {
-                                        $this->_agregarRespuestaFallo($xml_reqresponse, 401, 'Unauthorized agent');
-                                        $response = $xml_response;
-                                    }
+                                    $this->_agregarRespuestaFallo($xml_reqresponse, 404, 'Specified agent not found');
+                                    $response = $xml_response;
+                                } elseif (!$this->_hashValidoAgenteECCP($comando, $comando['appcookie'])) {
+                                    $this->_agregarRespuestaFallo($xml_reqresponse, 401, 'Unauthorized agent');
+                                    $response = $xml_response;
                                 }
                             }
                         }
@@ -367,8 +359,7 @@ class ECCPConn
         $sHashCliente = (string)$comando->agent_hash;
 
         $recordset = $this->_db->prepare(
-            'SELECT number, eccp_password FROM agent '.
-            "WHERE estatus = 'A' AND CONCAT(type,'/',number) = ?");
+            'SELECT number, eccp_password FROM agent WHERE estatus = \'A\' AND CONCAT(type,\'/\',number) = ?');
         $recordset->execute(array($sAgente));
         $tuplaAgente = $recordset->fetch(); $recordset->closeCursor();
         if (!$tuplaAgente) {
@@ -382,7 +373,7 @@ class ECCPConn
 
         // Calcular el hash que debió haber enviado el cliente
         $sHashEsperado = md5($appcookie.$sAgente.$sClaveECCPAgente);
-        return ($sHashEsperado == $sHashCliente);
+        return ($sHashEsperado === $sHashCliente);
     }
 
     private function Request_eccpauth_getqueuescript($comando)
@@ -398,8 +389,7 @@ class ECCPConn
         // Leer la información del script de la cola. El ORDER BY estatus hace
         // que se devuelva A y luego I.
         $recordset = $this->_db->prepare(
-            'SELECT script FROM queue_call_entry '.
-            'WHERE queue = ? ORDER BY estatus LIMIT 0,1');
+            'SELECT script FROM queue_call_entry WHERE queue = ? ORDER BY estatus LIMIT 0,1');
         $recordset->execute(array($queue));
         $tupla = $recordset->fetch(); $recordset->closeCursor();
         if (!$tupla) {
@@ -420,9 +410,7 @@ class ECCPConn
         $listaTiposConocidos = array('incoming', 'outgoing');
         if (!is_null($sTipoCampania) && !in_array($sTipoCampania, $listaTiposConocidos))
             return $this->_generarRespuestaFallo(400, 'Bad request - invalid campaign type');
-        if (!is_null($sTipoCampania))
-            $listaTipos = array($sTipoCampania);
-        else $listaTipos = $listaTiposConocidos;
+        $listaTipos = is_null($sTipoCampania) ? $listaTiposConocidos : array($sTipoCampania);
 
         // Filtro por nombre
         $sNombreContiene = NULL;
@@ -438,7 +426,7 @@ class ECCPConn
                 'active'    =>  'A',
                 'inactive'  =>  'I',
                 'finished'  =>  'T');
-            if (!in_array($sEstado, array_keys($listaEstadosConocidos)))
+            if (!array_key_exists($sEstado, $listaEstadosConocidos))
                 return $this->_generarRespuestaFallo(400, 'Bad request - invalid status');
             $sEstado = $listaEstadosConocidos[$sEstado];
         }
@@ -506,7 +494,7 @@ class ECCPConn
                 $paramSQL[] = $sFechaFin;
             }
 
-            if (count($listaWhere) > 0) {
+            if ($listaWhere !== []) {
                 $sPeticionSQL .= ' WHERE '.implode(' AND ', $listaWhere);
             }
 
@@ -514,9 +502,7 @@ class ECCPConn
         }
 
         // Preparar UNION SQL
-        if (count($listaSQL) > 0)
-            $sPeticionSQL = '('.implode(') UNION (', $listaSQL).')';
-        else $sPeticionSQL = $listaSQL[0];
+        $sPeticionSQL = $listaSQL !== [] ? '('.implode(') UNION (', $listaSQL).')' : $listaSQL[0];
 
         $sPeticionSQL .= ' ORDER BY campaign_type, id';
         if (!is_null($iLimite)) {
@@ -1136,24 +1122,22 @@ LEER_CAMPANIA;
 
                     // Validar que el campo de fecha tenga valor correcto
                     } elseif ($infoCampo['type'] == 'DATE' &&
-                        $sValor != '' && !(preg_match('/^\d{4}-\d{2}-\d{2}$/', $sValor) || preg_match('/^\d{4}-\d{2}-\d{2} d{2}:\d{2}:\d{2}$/', $sValor))) {
+                        $sValor != '' && (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $sValor) && !preg_match('/^\d{4}-\d{2}-\d{2} d{2}:\d{2}:\d{2}$/', $sValor))) {
                         $bDatosValidos = FALSE;
                         $this->_agregarRespuestaFallo($xml_saveFormDataResponse, 406,
                             'Date format not acceptable, must be yyyy-mm-dd or yyyy-mm-dd hh:mm:ss: '.$idForm.' - '.$idField);
-                    } else {
-                        if ($infoCampo['type'] == 'LIST') {
-                            // OJO: PRIMERA FORMA ANORMAL!!!
-                            // La implementación actual del código de formulario
-                            // agrega una coma de más al final de la lista
-                            if (strlen($infoCampo['value']) > 0 &&
-                                substr($infoCampo['value'], strlen($infoCampo['value']) - 1, 1) == ',') {
-                                $infoCampo['value'] = substr($infoCampo['value'], 0, strlen($infoCampo['value']) - 1);
-                            }
-                            if (!in_array($sValor, explode(',', $infoCampo['value']))) {
-                                $bDatosValidos = FALSE;
-                                $this->_agregarRespuestaFallo($xml_saveFormDataResponse, 406,
-                                    'Value not in list of accepted values: '.$idForm.' - '.$idField);
-                            }
+                    } elseif ($infoCampo['type'] == 'LIST') {
+                        // OJO: PRIMERA FORMA ANORMAL!!!
+                        // La implementación actual del código de formulario
+                        // agrega una coma de más al final de la lista
+                        if (strlen($infoCampo['value']) > 0 &&
+                            substr($infoCampo['value'], strlen($infoCampo['value']) - 1, 1) == ',') {
+                            $infoCampo['value'] = substr($infoCampo['value'], 0, strlen($infoCampo['value']) - 1);
+                        }
+                        if (!in_array($sValor, explode(',', $infoCampo['value']))) {
+                            $bDatosValidos = FALSE;
+                            $this->_agregarRespuestaFallo($xml_saveFormDataResponse, 406,
+                                'Value not in list of accepted values: '.$idForm.' - '.$idField);
                         }
                     }
                     if (!$bDatosValidos) break;
@@ -1275,7 +1259,7 @@ LEER_CAMPANIA;
         }
         if (!$this->_existeAgente($sAgente)) {
             return $this->Response_LoginAgentResponse('logged-out', 404, 'Specified agent not found');
-        } elseif (!in_array($sExtension, array_keys($listaExtensiones))) {
+        } elseif (!array_key_exists($sExtension, $listaExtensiones)) {
             return $this->Response_LoginAgentResponse('logged-out', 404, 'Specified extension not found');
         }
 
@@ -1449,7 +1433,7 @@ LEER_CAMPANIA;
      *
      * @return  VERDADERO en éxito, FALSE en error
      */
-    private function _loginAgente($sExtension, $sAgente, $name, $iTimeout)
+    private function _loginAgente($sExtension, $sAgente, $name, $iTimeout): bool
     {
         $r = NULL;
         $agentFields = $this->_parseAgent($sAgente);
@@ -1855,7 +1839,7 @@ LEER_CAMPANIA;
         // Verificar que todos los agentes existen en el sistema
         $listaAgentes = $this->_listarAgentes();
         $agentesExtras = array_diff($agentlist, array_keys($listaAgentes));
-        if (count($agentesExtras) > 0) {
+        if ($agentesExtras !== []) {
             $this->_agregarRespuestaFallo($xml_getAgentStatusResponse, 404, 'Specified agent not found');
             return $xml_response;
         }
@@ -2267,11 +2251,9 @@ LEER_CAMPANIA;
                 self::_agregarCallInfo($xml_agent, $infoAgente['callinfo']);
                 $infoLlamada = $infoAgente['callinfo'];
             }
-        } else {
-            if (!is_null($infoLlamada)) {
-                $xml_callInfo = $xml_agent->addChild('callinfo');
-                self::_agregarCallInfo($xml_callInfo, $infoLlamada);
-            }
+        } elseif (!is_null($infoLlamada)) {
+            $xml_callInfo = $xml_agent->addChild('callinfo');
+            self::_agregarCallInfo($xml_callInfo, $infoLlamada);
         }
 
         return array($sAgentStatus, $sExtension);
@@ -2491,7 +2473,7 @@ LEER_STATS_CAMPANIA;
         $idLlamada = NULL;
         if (isset($comando->campaign_type) && isset($comando->call_id)) {
             $sTipoCampania = (string)$comando->campaign_type;
-            if (!in_array($sTipoCampania, array('outgoing')))
+            if ($sTipoCampania != 'outgoing')
                 return $this->_generarRespuestaFallo(400, 'Bad request');
             $idLlamada = (int)$comando->call_id;
         }
@@ -2576,8 +2558,8 @@ LEER_STATS_CAMPANIA;
      *
      * @return bool VERDADERO en caso de éxito, FALSO en caso de error
      */
-    private function _agendarLlamadaAgente($calltype, $callid, $sAgente, $horario, $bMismoAgente,
-        $sNuevoTelefono, $sNuevoNombre, &$errcode, &$errdesc)
+    private function _agendarLlamadaAgente($calltype, $callid, $sAgente, mixed $horario, $bMismoAgente,
+        mixed $sNuevoTelefono, mixed $sNuevoNombre, &$errcode, &$errdesc)
     {
         $errcode = 0; $errdesc = 'Success';
 
@@ -2628,12 +2610,9 @@ LEER_STATS_CAMPANIA;
 
         // Información de la llamada atendida por el agente
         if (!is_null($calltype) && !is_null($callid)) {
-            // Verificar si la llamada existe y el agente está autorizado
-            switch ($calltype) {
-            case 'outgoing':
+            if ($calltype === 'outgoing') {
                 $sql = 'SELECT COUNT(*) AS N FROM calls WHERE id = ?';
                 $params = array($callid);
-                break;
             }
             $recordset = $this->_db->prepare($sql);
             $recordset->execute($params);
@@ -2767,8 +2746,7 @@ SQL_INSERTAR_AGENDAMIENTO;
 
             // Insertar atributos para la nueva llamada
             $sth = $this->_db->prepare(
-                'INSERT INTO call_attribute (columna, value, column_number, id_call) '.
-                'VALUES (?, ?, ?, ?)');
+                'INSERT INTO call_attribute (columna, value, column_number, id_call) VALUES (?, ?, ?, ?)');
             foreach ($attrLlamada as $iColNum => $tuplaAttr) {
                 // Se asume elemento 0 es 'columna', 1 es 'value' en call_attribute
                 $tuplaAttr[] = $iColNum;        // Debería ser posición 2
@@ -2778,8 +2756,7 @@ SQL_INSERTAR_AGENDAMIENTO;
 
             // Insertar valores de formularios
             $sth = $this->_db->prepare(
-                'INSERT INTO form_data_recolected (value, id_form_field, id_calls) '.
-                'VALUES (?, ?, ?)');
+                'INSERT INTO form_data_recolected (value, id_form_field, id_calls) VALUES (?, ?, ?)');
             foreach ($formLlamada as $id_ff => $value) {
                 $sth->execute(array($value, $id_ff, $idNuevaLlamada));
             }
@@ -3130,7 +3107,7 @@ SQL_INSERTAR_AGENDAMIENTO;
         // Verificar que todos los agentes existen en el sistema
         $listaAgentes = $this->_listarAgentes();
         $agentesExtras = array_diff(array_keys($agentlist), array_keys($listaAgentes));
-        if (count($agentesExtras) > 0) {
+        if ($agentesExtras !== []) {
             $this->_agregarRespuestaFallo($xml_getagentqueuesResponse, 404, 'Specified agent not found');
             return $xml_response;
         }

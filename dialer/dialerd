@@ -41,6 +41,7 @@ function autocargador($sNombreClase) {
 }
 spl_autoload_register('autocargador');
 
+
 require_once('Console/Getopt.php');     // Parseo de opciones de línea de comando
 
 $gsNombreSignal = NULL; // Número de la señal atrapada
