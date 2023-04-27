@@ -2,7 +2,7 @@
 #
 #   Script de inicio y finalización de un servicio de framework
 #   de demonio de Palosanto Solutions, compatible con
-#   sistema de inicio de servicios de RedHat/Fedora (chkconfig).
+#   sistema de inicio de servicios de Ubuntu.
 #   Este script asume que el servicio se inicia desde el comienzo
 #   con privilegios de usuario normal (no root)
 #
